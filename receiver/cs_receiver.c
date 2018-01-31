@@ -27,6 +27,7 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <fcntl.h>
+#include <time.h>
 
 #define USE_FIFO 0
 
@@ -41,6 +42,24 @@
 #define DISCOVER_MSG_TEMPLATE "{\"port\":%d,\"name\":\"CsReceiver @ %s\",\"id\":\"%s\",\"width\":1280,\"height\":960,\"connect\":\"%d\"}"
 
 #define FIFO_PATH "/tmp/cast_fifo"
+
+#define PRINT(fmt, ...) printf("%s   "fmt, get_cur_time(), ##__VA_ARGS__)
+#define ERROR(fmt, ...) printf("%s   "fmt" :%s\n", get_cur_time(), ##__VA_ARGS__, strerror(errno))
+
+char *get_cur_time()
+{
+    static char s[20];
+    time_t t;
+    struct tm* ltime;
+
+    time(&t);
+
+    ltime = localtime(&t);
+
+    strftime(s, 20, "%Y-%m-%d %H:%M:%S", ltime);
+
+    return s;
+}
 
 pid_t popen2(char * const *command, int *infp, int *outfp)
 {
@@ -62,7 +81,7 @@ pid_t popen2(char * const *command, int *infp, int *outfp)
         dup2(p_stdout[WRITE], WRITE);
 
         execvp((const char *)*command, command);
-        perror("execvp");
+        ERROR("execvp");
         exit(1);
     }
 
@@ -86,17 +105,17 @@ int setup_udp_socket() {
     struct sockaddr_in broadcast_addr;
 
     if ((udp_sock = socket(AF_INET, SOCK_DGRAM, 0)) < 0) {
-        perror("Error when creating udp socket");
+        ERROR("Error when creating udp socket");
         return -1;
     }
 
     if (setsockopt(udp_sock, SOL_SOCKET, SO_REUSEADDR, &so_reuseaddr, sizeof(so_reuseaddr)) < 0) {
-        perror("Error when setting reuseaddr for udp socket");
+        ERROR("Error when setting reuseaddr for udp socket");
         return -1;
     }
 
     if (setsockopt(udp_sock, IPPROTO_IP, IP_PKTINFO, &pktinfo, sizeof(pktinfo)) < 0) {
-        perror("Error when setting pktinfo for udp socket");
+        ERROR("Error when setting pktinfo for udp socket");
         return -1;
     }
 
@@ -106,7 +125,7 @@ int setup_udp_socket() {
     broadcast_addr.sin_port = htons(DISCOVER_PORT);
 
     if (bind(udp_sock, (struct sockaddr *)&broadcast_addr, sizeof(broadcast_addr)) < 0) {
-        perror("Error when binding broadcast port for udp socket");
+        ERROR("Error when binding broadcast port for udp socket");
         return -1;
     }
     return udp_sock;
@@ -137,26 +156,29 @@ int main(int argc, char* argv[])
     int is_connected = 0;
     time_t last_read_time, now_time;
 
+    fflush(stdout);
+    setvbuf(stdout, NULL, _IONBF, 0);
+
     if (argc != 2 || strlen(argv[1]) <= 0) {
-        perror("Missing sink setting");
+        PRINT("Missing sink setting");
         return -1;
     }
 
     gst_sink = argv[1];
-    printf("Using sink: %s\n", gst_sink);
+    PRINT("Using sink: %s\n", gst_sink);
 
 #if USE_FIFO
     unlink(FIFO_PATH);
     if (mkfifo(FIFO_PATH, 0666) < 0) {
-        perror("Error when creating fifo");
-        return 0;
+        ERROR("Error when creating fifo");
+        return -1;
     }
 #endif
 
 #ifdef CLIENT_MODE
     if ((tcp_client_sock = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
-        perror("Error when creating tcp socket");
-        return 0;
+        ERROR("Error when creating tcp socket");
+        return -1;
     }
 
     memset((char *)&peer_addr, 0, sizeof(peer_addr));
@@ -168,25 +190,25 @@ int main(int argc, char* argv[])
     setsockopt(tcp_client_sock, SOL_SOCKET, SO_RCVBUF, (const char*)&nRecvBuf, sizeof(nRecvBuf));
 
     if (connect(tcp_client_sock, (const struct sockaddr *)&peer_addr, sizeof(peer_addr)) < 0) {
-        perror("Error when connecting to remote");
-        return 0;
+        ERROR("Error when connecting to remote");
+        return -1;
     }
     if (send(tcp_client_sock, "mirror\n", 7, 0) < 0) {
-        perror("Error when sending mirror command");
-        return 0;
+        ERROR("Error when sending mirror command");
+        return -1;
     }
     just_connect = 1;
 
 #else
     udp_sock = setup_udp_socket();
-    printf("udp_sock=%d\n", udp_sock);
+    PRINT("udp_sock=%d\n", udp_sock);
     if ((tcp_sock = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
-        perror("Error when creating tcp socket");
-        return 0;
+        ERROR("Error when creating tcp socket");
+        return -1;
     }
 
     if (setsockopt(tcp_sock, SOL_SOCKET, SO_REUSEADDR, &so_reuseaddr, sizeof(so_reuseaddr)) < 0) {
-        perror("Error when setting reuseaddr for tcp socket");
+        ERROR("Error when setting reuseaddr for tcp socket");
         return -1;
     }
 
@@ -196,13 +218,13 @@ int main(int argc, char* argv[])
     my_addr.sin_port = htons(DISCOVER_PORT);
 
     if (bind(tcp_sock, (struct sockaddr *)&my_addr, sizeof(my_addr)) < 0) {
-        perror("Error when binding tcp socket");
-        return 0;
+        ERROR("Error when binding tcp socket");
+        return -1;
     }
 
     if (listen(tcp_sock, 3) < 0) {
-        perror("Error when listening tcp socket");
-        return 0;
+        ERROR("Error when listening tcp socket");
+        return -1;
     }
 #endif
 
@@ -213,8 +235,10 @@ int main(int argc, char* argv[])
         tv.tv_sec = 10;
         tv.tv_usec = 0;
         FD_ZERO(&fd_r);
+        if (tcp_client_sock < 0) {
+            FD_SET(tcp_sock, &fd_r);
+        }
         FD_SET(udp_sock, &fd_r);
-        FD_SET(tcp_sock, &fd_r);
         if (tcp_sock > udp_sock) {
             max_sock = tcp_sock;
         } else {
@@ -228,8 +252,7 @@ int main(int argc, char* argv[])
         }
         ret = select(max_sock + 1, &fd_r, NULL, NULL, &tv);
         time(&now_time);
-        if (is_connected && (now_time - last_read_time >= 5)) {
-            printf("read timeout for 5s, close the socket and receiver\n");
+        if (is_connected && (now_time - last_read_time >= 10)) {
             if (tcp_client_sock > 0) {
                 close(tcp_client_sock);
                 tcp_client_sock = -1;
@@ -246,11 +269,12 @@ int main(int argc, char* argv[])
                 fifo_fp = -1;
             }
             is_connected = 0;
+            PRINT("read timeout for 10s, close the socket and receiver\n");
         }
-        //printf("select=%d no_data_count=%d\n", ret, no_data_count);
+        //PRINT("select=%d no_data_count=%d\n", ret, no_data_count);
         switch (ret) {
             case -1:
-                printf("error occur, %s\n", strerror(errno));
+                ERROR("error occur");
                 break;
             case 0:
                 timeout = 1;
@@ -273,24 +297,24 @@ int main(int argc, char* argv[])
                     msg.msg_namelen = sizeof(peer_addr);
                     len = recvmsg(udp_sock, &msg, 0);
                     if (len < 0) {
-                        printf("Error when receiving data from discover socket, errno: %s\n", strerror(errno));
+                        ERROR("Error when receiving data from discover socket");
                         close(udp_sock);
                         udp_sock = setup_udp_socket();
                         break;
                     }
-                    printf("Receive broadcast msg: %s from: %s:%d\n", broadcast_msg_buf, inet_ntoa(peer_addr.sin_addr), ntohs(peer_addr.sin_port));
+                    PRINT("Receive broadcast msg: %s from: %s:%d\n", broadcast_msg_buf, inet_ntoa(peer_addr.sin_addr), ntohs(peer_addr.sin_port));
                     if (!strncmp(broadcast_msg_buf, DISCOVER_MSG, 5)) {
                         no_data_count = 0;
-                        //printf("Receive discover msg: %s, from: %s\n", broadcast_msg_buf, inet_ntoa(peer_addr.sin_addr));
+                        //PRINT("Receive discover msg: %s, from: %s\n", broadcast_msg_buf, inet_ntoa(peer_addr.sin_addr));
                         for (cmsg = CMSG_FIRSTHDR(&msg); cmsg != NULL; cmsg = CMSG_NXTHDR(&msg, cmsg)) {
                             if (cmsg->cmsg_level == IPPROTO_IP) {
                                 struct in_pktinfo *i = (struct in_pktinfo*) CMSG_DATA(cmsg);
-                                //printf("Response discover msg with local ip: %s\n", inet_ntoa(i->ipi_spec_dst));
+                                //PRINT("Response discover msg with local ip: %s\n", inet_ntoa(i->ipi_spec_dst));
                                 memset(resp_msg_buf, 0, sizeof(resp_msg_buf));
                                 snprintf(resp_msg_buf, sizeof(resp_msg_buf), DISCOVER_MSG_TEMPLATE, DISCOVER_PORT, inet_ntoa(i->ipi_spec_dst), inet_ntoa(i->ipi_spec_dst), is_connected);
-                                printf("is_connected=%d\n", is_connected);
+                                //PRINT("is_connected=%d\n", is_connected);
                                 if (sendto(udp_sock, resp_msg_buf, strlen(resp_msg_buf), 0, (struct sockaddr *)&peer_addr, sizeof(peer_addr)) < 0) {
-                                    printf("Error when send discover response to peer\n");
+                                    PRINT("Error when send discover response to peer\n");
                                 }
                             }
                         }
@@ -300,29 +324,30 @@ int main(int argc, char* argv[])
                         addr_len = sizeof(peer_addr);
                         tcp_client_sock = accept(tcp_sock, (struct sockaddr *)&peer_addr, &addr_len);
                         if (tcp_client_sock < 0) {
-                            printf("Error when accepting client\n");
+                            PRINT("Error when accepting client\n");
                         } else {
                             just_connect = 1;
                             is_connected = 1;
                             last_read_time = now_time;
-                            printf("Accept peer addr: %s:%d\n", inet_ntoa(peer_addr.sin_addr), ntohs(peer_addr.sin_port));
+                            PRINT("Accept peer addr: %s:%d\n", inet_ntoa(peer_addr.sin_addr), ntohs(peer_addr.sin_port));
                         }
                     } else {
-                        printf("Could not accept client, another connection still exist\n");
+                        PRINT("Could not accept client, another connection still exist\n");
+                        return -1;
                     }
                 } else if (tcp_client_sock > 0 && FD_ISSET(tcp_client_sock, &fd_r)) {
                     memset(data_msg_buf, 0, sizeof(data_msg_buf));
                     len = read(tcp_client_sock, data_msg_buf, sizeof(data_msg_buf));
-                    //printf("Receive data len: %d\n", len);
+                    //PRINT("Receive data len: %d\n", len);
                     if (len > 0) {
                         no_data_count = 0;
                         time(&last_read_time);
                     } else {
                         no_data_count++;
                     }
-                    //printf("len=%d, no_data_count=%d\n", len, no_data_count);
+                    //PRINT("len=%d, no_data_count=%d\n", len, no_data_count);
                     if (len < 0 || no_data_count > 2) {
-                        printf("Failed to receive from tcp client socket, close the socket\n");
+                        PRINT("Failed to receive from tcp client socket, close the socket\n");
                         close(tcp_client_sock);
                         tcp_client_sock = -1;
                         if (gst_pid > 0) {
@@ -344,24 +369,24 @@ int main(int argc, char* argv[])
                         if (just_connect && strstr(data_msg_buf, "\r\n")) {
                             int width = 800;
                             int height = 480;
-                            printf("Receive control data(%u): %s\n", len, data_msg_buf);
+                            PRINT("Receive control data(%u): %s\n", len, data_msg_buf);
                             char *control_end = strstr(data_msg_buf, "\r\n\r\n");
                             int bdata_len = 0;
                             if (control_end + 4 - data_msg_buf > 0) {
                                 bdata_len = len - (control_end + 4 - data_msg_buf);
                                 control_end = control_end + 4;
                             }
-                            printf("bdata_len=%d\n", bdata_len);
+                            //PRINT("bdata_len=%d\n", bdata_len);
                             char *info = strtok(data_msg_buf, "\r\n");
                             while (info) {
-                                //printf("info: %s\n", info);
+                                //PRINT("info: %s\n", info);
                                 if (strstr(info, "X-WIDTH:")) {
                                     width = atoi(strstr(info, " "));
-                                    printf("width: %d\n", width);
+                                    PRINT("width: %d\n", width);
                                 }
                                 if (strstr(info, "X-HEIGHT:")) {
                                     height = atoi(strstr(info, " "));
-                                    printf("height: %d\n", height);
+                                    PRINT("height: %d\n", height);
                                 }
                                 info = strtok(NULL, "\r\n");
                             }
@@ -390,7 +415,7 @@ int main(int argc, char* argv[])
                                 char mime_buf[70] = {0};
                                 snprintf(mime_buf, 70, "video\/x-h264,width=%d,height=%d,framerate=30\/1", width, height);
                                 //snprintf(mime_buf, 70, "video\/x-h264,width=%d,height=%d,framerate=30\/1,stream-format=avc", width, height);
-                                printf("Using cap: %s\n", mime_buf);
+                                PRINT("Using cap: %s\n", mime_buf);
                                 char * const command[] = {"gst-launch-0.10", "filesrc", location_buf, "do-timestamp=true", "!", mime_buf, "!", "vpudec", "framedrop=true", "frame-plus=1", "low-latency=true", "!", gst_sink, NULL};
 #else
                                 char * const command[] = {"gst-launch-1.0", "filesrc", location_buf, "do-timestamp=true", "!", "h264parse", "!", "decodebin", "!", gst_sink, NULL};
@@ -400,20 +425,20 @@ int main(int argc, char* argv[])
                                 char mime_buf[70] = {0};
                                 snprintf(mime_buf, 70, "video\/x-h264,width=%d,height=%d,framerate=30\/1", width, height);
                                 //snprintf(mime_buf, 70, "video\/x-h264,width=%d,height=%d,framerate=30\/1,stream-format=avc", width, height);
-                                printf("Using cap: %s\n", mime_buf);
+                                PRINT("Using cap: %s\n", mime_buf);
                                 char * const command[] = {"gst-launch-0.10", "fdsrc", "do-timestamp=true", "!", mime_buf, "!", "vpudec", "framedrop=false", "frame-plus=1", "low-latency=true", "!", gst_sink, NULL};
 #else
                                 char * const command[] = {"gst-launch-1.0", "fdsrc", "do-timestamp=true", "!", "h264parse", "!", "decodebin", "!" , "videorate", "!", gst_sink, NULL};
 #endif
 #endif
-                                printf("command:%s\n", *command);
+                                PRINT("command:%s\n", *command);
                                 gst_pid = popen2(command, &gst_in_fp, &gst_out_fp);
                             }
-                            printf("gst pid: %d\n", gst_pid);
-                            printf("gst in fp: %d\n", gst_in_fp);
+                            PRINT("gst pid: %d\n", gst_pid);
+                            PRINT("gst in fp: %d\n", gst_in_fp);
 #if USE_FIFO
                             fifo_fp = open(FIFO_PATH, O_WRONLY);
-                            printf("fifo_fp: %d\n", fifo_fp);
+                            PRINT("fifo_fp: %d\n", fifo_fp);
 #endif
 
                             just_connect = 0;
@@ -421,12 +446,12 @@ int main(int argc, char* argv[])
 #if USE_FIFO
                                 if (fifo_fp > 0) {
                                     len = write(fifo_fp, control_end, bdata_len);
-                                    printf("Write non control data len: %d\n", len);
+                                    PRINT("Write non control data len: %d\n", len);
                                 }
 #else
                                 if (gst_in_fp > 0) {
                                     len = write(gst_in_fp, control_end, bdata_len);
-                                    printf("Write non control data len: %d\n", len);
+                                    PRINT("Write non control data len: %d\n", len);
                                 }
 #endif
                             }
@@ -434,17 +459,17 @@ int main(int argc, char* argv[])
 #if USE_FIFO
                             if (fifo_fp > 0) {
                                 len = write(fifo_fp, data_msg_buf, len);
-                                //printf("Write to fifo len: %d\n", len);
+                                //PRINT("Write to fifo len: %d\n", len);
                                 if (len < 0) {
-                                    printf("Pipe input error: %s\n", strerror(errno));
+                                    ERROR("Pipe input error");
                                 }
                             }
 #else
                             if (gst_in_fp > 0) {
                                 len = write(gst_in_fp, data_msg_buf, len);
-                                //printf("Piped len: %d\n", len);
+                                //PRINT("Piped len: %d\n", len);
                                 if (len < 0) {
-                                    printf("Pipe input error: %s\n", strerror(errno));
+                                    ERROR("Pipe input error");
                                 }
                             }
 #endif
@@ -456,7 +481,7 @@ int main(int argc, char* argv[])
                             no_data_count++;
                             // 3 * 10 = 30 seconds
                             if (no_data_count > 1) {
-                                printf("No data for casting after 10 seconds, close the socket and receiver\n");
+                                PRINT("No data for casting after 10 seconds, close the socket and receiver\n");
                                 if (tcp_client_sock > 0) {
                                     close(tcp_client_sock);
                                     tcp_client_sock = -1;
