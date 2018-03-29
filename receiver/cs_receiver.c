@@ -42,6 +42,7 @@
 #define DISCOVER_MSG_TEMPLATE "{\"port\":%d,\"name\":\"CsReceiver @ %s\",\"id\":\"%s\",\"width\":1280,\"height\":960,\"connect\":\"%d\"}"
 
 #define FIFO_PATH "/tmp/cast_fifo"
+#define IP_FILE "sender_ip"
 
 #define PRINT(fmt, ...) printf("%s   "fmt, get_cur_time(), ##__VA_ARGS__)
 #define ERROR(fmt, ...) printf("%s   "fmt" :%s\n", get_cur_time(), ##__VA_ARGS__, strerror(errno))
@@ -155,12 +156,15 @@ int main(int argc, char* argv[])
     int no_data_count = 0;
     int is_connected = 0;
     time_t last_read_time, now_time;
+    struct timeval tv;
+    int timeout = 0;
+    FILE *fp;
 
     fflush(stdout);
     setvbuf(stdout, NULL, _IONBF, 0);
 
     if (argc != 2 || strlen(argv[1]) <= 0) {
-        PRINT("Missing sink setting");
+        PRINT("Missing sink setting\n");
         return -1;
     }
 
@@ -228,8 +232,6 @@ int main(int argc, char* argv[])
     }
 #endif
 
-    int timeout = 0;
-    struct timeval tv;
     for (;;) {
         // set connect timeout
         tv.tv_sec = 10;
@@ -269,6 +271,11 @@ int main(int argc, char* argv[])
                 fifo_fp = -1;
             }
             is_connected = 0;
+            if (access(IP_FILE, F_OK) == 0) {
+                if (remove(IP_FILE) == -1) {
+                    ERROR("Error when remove file");
+                }
+            }
             PRINT("read timeout for 10s, close the socket and receiver\n");
         }
         //PRINT("select=%d no_data_count=%d\n", ret, no_data_count);
@@ -330,6 +337,13 @@ int main(int argc, char* argv[])
                             is_connected = 1;
                             last_read_time = now_time;
                             PRINT("Accept peer addr: %s:%d\n", inet_ntoa(peer_addr.sin_addr), ntohs(peer_addr.sin_port));
+                            fp = fopen(IP_FILE, "w");
+                            if (!fp) {
+                                ERROR("Error when open file");
+                            } else {
+                                fprintf(fp, "%s", inet_ntoa(peer_addr.sin_addr));
+                                fclose(fp);
+                            }
                         }
                     } else {
                         PRINT("Could not accept client, another connection still exist\n");
@@ -362,6 +376,11 @@ int main(int argc, char* argv[])
                             fifo_fp = -1;
                         }
                         is_connected = 0;
+                        if (access(IP_FILE, F_OK) == 0) {
+                            if (remove(IP_FILE) == -1) {
+                                ERROR("Error when remove file");
+                            }
+                        }
 #ifdef CLIENT_MODE
                         return 0;
 #endif
@@ -498,6 +517,11 @@ int main(int argc, char* argv[])
                                     fifo_fp = -1;
                                 }
                                 is_connected = 0;
+                                if (access(IP_FILE, F_OK) == 0) {
+                                    if (remove(IP_FILE) == -1) {
+                                        ERROR("Error when remove file");
+                                    }
+                                }
                             }
                         }
                     }
