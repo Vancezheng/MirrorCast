@@ -39,7 +39,7 @@
 #define LOCAL_SERVER_PORT 53516
 #define DATA_BUF_SIZE 10240
 
-#define DISCOVER_MSG_TEMPLATE "{\"port\":%d,\"name\":\"CsReceiver @ %s\",\"id\":\"%s\",\"width\":1280,\"height\":960,\"connect\":\"%d\"}"
+#define DISCOVER_MSG_TEMPLATE "{\"port\":%d,\"name\":\"okay\",\"ip\":\"%s\",\"width\":1280,\"height\":960,\"connect\":\"%d\"}"
 
 #define FIFO_PATH "/tmp/cast_fifo"
 #define IP_FILE "sender_ip"
@@ -95,6 +95,24 @@ pid_t popen2(char * const *command, int *infp, int *outfp)
         close(p_stdout[READ]);
     else
         *outfp = p_stdout[READ];
+
+    return pid;
+}
+
+pid_t exec(char * const *command)
+{
+    pid_t pid;
+
+    pid = fork();
+
+    if (pid < 0)
+        return pid;
+    else if (pid == 0)
+    {
+        execvp((const char *)*command, command);
+        ERROR("execvp");
+        exit(1);
+    }
 
     return pid;
 }
@@ -159,6 +177,8 @@ int main(int argc, char* argv[])
     struct timeval tv;
     int timeout = 0;
     FILE *fp;
+    char *playUrl;
+    int is_rtmp_mode = 0;
 
     fflush(stdout);
     setvbuf(stdout, NULL, _IONBF, 0);
@@ -239,8 +259,8 @@ int main(int argc, char* argv[])
         FD_ZERO(&fd_r);
         if (tcp_client_sock < 0) {
             FD_SET(tcp_sock, &fd_r);
+            FD_SET(udp_sock, &fd_r);
         }
-        FD_SET(udp_sock, &fd_r);
         if (tcp_sock > udp_sock) {
             max_sock = tcp_sock;
         } else {
@@ -252,7 +272,9 @@ int main(int argc, char* argv[])
                 max_sock = tcp_client_sock;
             }
         }
+
         ret = select(max_sock + 1, &fd_r, NULL, NULL, &tv);
+#if 0
         time(&now_time);
         if (is_connected && (now_time - last_read_time >= 10)) {
             if (tcp_client_sock > 0) {
@@ -278,12 +300,14 @@ int main(int argc, char* argv[])
             }
             PRINT("read timeout for 10s, close the socket and receiver\n");
         }
+#endif
         //PRINT("select=%d no_data_count=%d\n", ret, no_data_count);
         switch (ret) {
             case -1:
                 ERROR("error occur");
                 break;
             case 0:
+                //PRINT("timeout!\n");
                 timeout = 1;
             default: {
                 if (FD_ISSET(udp_sock, &fd_r)) {
@@ -309,7 +333,7 @@ int main(int argc, char* argv[])
                         udp_sock = setup_udp_socket();
                         break;
                     }
-                    PRINT("Receive broadcast msg: %s from: %s:%d\n", broadcast_msg_buf, inet_ntoa(peer_addr.sin_addr), ntohs(peer_addr.sin_port));
+                    //PRINT("Receive broadcast msg: %s from: %s:%d\n", broadcast_msg_buf, inet_ntoa(peer_addr.sin_addr), ntohs(peer_addr.sin_port));
                     if (!strncmp(broadcast_msg_buf, DISCOVER_MSG, 5)) {
                         no_data_count = 0;
                         //PRINT("Receive discover msg: %s, from: %s\n", broadcast_msg_buf, inet_ntoa(peer_addr.sin_addr));
@@ -318,7 +342,7 @@ int main(int argc, char* argv[])
                                 struct in_pktinfo *i = (struct in_pktinfo*) CMSG_DATA(cmsg);
                                 //PRINT("Response discover msg with local ip: %s\n", inet_ntoa(i->ipi_spec_dst));
                                 memset(resp_msg_buf, 0, sizeof(resp_msg_buf));
-                                snprintf(resp_msg_buf, sizeof(resp_msg_buf), DISCOVER_MSG_TEMPLATE, DISCOVER_PORT, inet_ntoa(i->ipi_spec_dst), inet_ntoa(i->ipi_spec_dst), is_connected);
+                                snprintf(resp_msg_buf, sizeof(resp_msg_buf), DISCOVER_MSG_TEMPLATE, DISCOVER_PORT, inet_ntoa(i->ipi_spec_dst), is_connected);
                                 //PRINT("is_connected=%d\n", is_connected);
                                 if (sendto(udp_sock, resp_msg_buf, strlen(resp_msg_buf), 0, (struct sockaddr *)&peer_addr, sizeof(peer_addr)) < 0) {
                                     PRINT("Error when send discover response to peer\n");
@@ -407,21 +431,43 @@ int main(int argc, char* argv[])
                                     height = atoi(strstr(info, " "));
                                     PRINT("height: %d\n", height);
                                 }
+                                if (strstr(info, "RTMP:")) {
+                                    is_rtmp_mode = atoi(strstr(info, " "));
+                                    PRINT("is_rtmp_mode: %d\n", is_rtmp_mode);
+                                }
+                                if (strstr(info, "URL:")) {
+                                    playUrl = strstr(info, " ") + 1;
+                                    PRINT("play url:%s\n", playUrl);
+                                }
                                 info = strtok(NULL, "\r\n");
                             }
 
                             if (!strncmp(gst_sink, "ffplay", 6)) {
 #if USE_FIFO
                                 char * const command[] = {"ffplay", "-framerate", "50", "-infbuf", "-framedrop", "-analyzeduration", "1", FIFO_PATH, NULL};
+                                gst_pid = popen2(command, &gst_in_fp, &gst_out_fp);
 #else
-                                char * const command[] = {"ffplay", "-infbuf", "-framedrop", "-analyzeduration", "1", "-", NULL};
-                                //const char *command[] = {"ffplay", "-", NULL};
+                                if (is_rtmp_mode) {
+                                    if (playUrl != NULL) {
+                                        char * const command[] = {"ffplay", "-fs", "-infbuf", "-framedrop", "-analyzeduration", "100000", "-i", playUrl, NULL};
+                                        gst_pid = exec(command);
+                                    }
+                                } else {
+                                    char * const command[] = {"ffplay", "-fs", "-infbuf", "-framedrop", "-analyzeduration", "100000", "-", NULL};
+                                    //const char *command[] = {"ffplay", "-", NULL};
+                                    gst_pid = popen2(command, &gst_in_fp, &gst_out_fp);
+                                }
 #endif
-                                gst_pid = popen2(command, &gst_in_fp, &gst_out_fp);
                             } else if (!strncmp(gst_sink, "ffvademo", 8)) {
-                                //const char *command[] = {"ffvademo", "-x", "1920", "-y", "1080", "/dev/stdin", NULL};
-                                char * const command[] = {"ffvademo", "/dev/stdin", NULL};
-                                gst_pid = popen2(command, &gst_in_fp, &gst_out_fp);
+                                if (is_rtmp_mode) {
+                                    if (playUrl != NULL) {
+                                        char * const command[] = {"ffvademo", playUrl, NULL};
+                                        gst_pid = exec(command);
+                                    }
+                                } else {
+                                    char * const command[] = {"ffvademo", "/dev/stdin", NULL};
+                                    gst_pid = popen2(command, &gst_in_fp, &gst_out_fp);
+                                }
                             } else if (!strncmp(gst_sink, "ffvadisplay", 11)) {
                                 char * const command[] = {"ffvadisplay", "-x", "1920", "-y", "1200", "/dev/stdin", NULL};
                                 gst_pid = popen2(command, &gst_in_fp, &gst_out_fp);
@@ -474,7 +520,23 @@ int main(int argc, char* argv[])
                                 }
 #endif
                             }
+                        } else if (strstr(data_msg_buf, "disconnect by user!")) {
+                                if (tcp_client_sock > 0) {
+                                    close(tcp_client_sock);
+                                    tcp_client_sock = -1;
+                                }
+                                if (gst_pid > 0) {
+                                    kill(gst_pid, SIGKILL);
+                                    waitpid(gst_pid, NULL, 0);
+                                    gst_pid = -1;
+                                }
+                                is_connected = 0;
+                                if (remove(IP_FILE) == -1) {
+                                    ERROR("Error when remove file");
+                                }
+                                PRINT("disconnect!\n");
                         } else {
+                            //PRINT("Receive data:%s len:%d\n", data_msg_buf, len);
 #if USE_FIFO
                             if (fifo_fp > 0) {
                                 len = write(fifo_fp, data_msg_buf, len);
