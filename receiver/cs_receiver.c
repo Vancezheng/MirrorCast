@@ -34,7 +34,8 @@
 #define READ 0
 #define WRITE 1
 
-#define DISCOVER_PORT 53515
+#define VIEWER_PORT 53515
+#define DISCOVER_PORT 53516
 #define DISCOVER_MSG "hello"
 #define LOCAL_SERVER_PORT 53516
 #define DATA_BUF_SIZE 10240
@@ -162,7 +163,7 @@ int main(int argc, char* argv[])
     struct sockaddr_in my_addr;
     struct sockaddr_in peer_addr;
     int addr_len;
-    char resp_msg_buf[512];
+    char resp_msg_buf[128];
     char data_msg_buf[DATA_BUF_SIZE];
     int len;
     fd_set fd_r;
@@ -239,7 +240,7 @@ int main(int argc, char* argv[])
     memset((char *)&my_addr, 0, sizeof(my_addr));
     my_addr.sin_family = AF_INET;
     my_addr.sin_addr.s_addr = htonl(INADDR_ANY);
-    my_addr.sin_port = htons(DISCOVER_PORT);
+    my_addr.sin_port = htons(VIEWER_PORT);
 
     if (bind(tcp_sock, (struct sockaddr *)&my_addr, sizeof(my_addr)) < 0) {
         ERROR("Error when binding tcp socket");
@@ -259,8 +260,8 @@ int main(int argc, char* argv[])
         FD_ZERO(&fd_r);
         if (tcp_client_sock < 0) {
             FD_SET(tcp_sock, &fd_r);
-            FD_SET(udp_sock, &fd_r);
         }
+        FD_SET(udp_sock, &fd_r);
         if (tcp_sock > udp_sock) {
             max_sock = tcp_sock;
         } else {
@@ -326,6 +327,7 @@ int main(int argc, char* argv[])
                     msg.msg_flags = 0;
                     msg.msg_name = &peer_addr;
                     msg.msg_namelen = sizeof(peer_addr);
+                    memset(broadcast_msg_buf, 0, sizeof(broadcast_msg_buf));
                     len = recvmsg(udp_sock, &msg, 0);
                     if (len < 0) {
                         ERROR("Error when receiving data from discover socket");
@@ -349,6 +351,21 @@ int main(int argc, char* argv[])
                                 }
                             }
                         }
+                    } else if (!strncmp(broadcast_msg_buf, "disconnect", 10)) {
+                        if (tcp_client_sock > 0) {
+                            close(tcp_client_sock);
+                            tcp_client_sock = -1;
+                        }
+                        if (gst_pid > 0) {
+                            kill(gst_pid, SIGKILL);
+                            waitpid(gst_pid, NULL, 0);
+                            gst_pid = -1;
+                        }
+                        is_connected = 0;
+                        if (remove(IP_FILE) == -1) {
+                            ERROR("Error when remove file");
+                        }
+                        PRINT("disconnect by user!\n");
                     }
                 } else if (FD_ISSET(tcp_sock, &fd_r)) {
                     if (tcp_client_sock < 0) {
@@ -520,7 +537,7 @@ int main(int argc, char* argv[])
                                 }
 #endif
                             }
-                        } else if (strstr(data_msg_buf, "disconnect by user!")) {
+                        } else if (strstr(data_msg_buf, "disconnect")) {
                                 if (tcp_client_sock > 0) {
                                     close(tcp_client_sock);
                                     tcp_client_sock = -1;
@@ -534,7 +551,7 @@ int main(int argc, char* argv[])
                                 if (remove(IP_FILE) == -1) {
                                     ERROR("Error when remove file");
                                 }
-                                PRINT("disconnect!\n");
+                                PRINT("disconnect by user!\n");
                         } else {
                             //PRINT("Receive data:%s len:%d\n", data_msg_buf, len);
 #if USE_FIFO
