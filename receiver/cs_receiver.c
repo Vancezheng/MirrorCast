@@ -338,7 +338,7 @@ int main(int argc, char* argv[])
                     //PRINT("Receive broadcast msg: %s from: %s:%d\n", broadcast_msg_buf, inet_ntoa(peer_addr.sin_addr), ntohs(peer_addr.sin_port));
                     if (!strncmp(broadcast_msg_buf, DISCOVER_MSG, 5)) {
                         no_data_count = 0;
-                        //PRINT("Receive discover msg: %s, from: %s\n", broadcast_msg_buf, inet_ntoa(peer_addr.sin_addr));
+                        PRINT("Receive discover msg: %s, from: %s\n", broadcast_msg_buf, inet_ntoa(peer_addr.sin_addr));
                         for (cmsg = CMSG_FIRSTHDR(&msg); cmsg != NULL; cmsg = CMSG_NXTHDR(&msg, cmsg)) {
                             if (cmsg->cmsg_level == IPPROTO_IP) {
                                 struct in_pktinfo *i = (struct in_pktinfo*) CMSG_DATA(cmsg);
@@ -378,13 +378,6 @@ int main(int argc, char* argv[])
                             is_connected = 1;
                             last_read_time = now_time;
                             PRINT("Accept peer addr: %s:%d\n", inet_ntoa(peer_addr.sin_addr), ntohs(peer_addr.sin_port));
-                            fp = fopen(IP_FILE, "w");
-                            if (!fp) {
-                                ERROR("Error when open file");
-                            } else {
-                                fprintf(fp, "%s", inet_ntoa(peer_addr.sin_addr));
-                                fclose(fp);
-                            }
                         }
                     } else {
                         PRINT("Could not accept client, another connection still exist\n");
@@ -515,6 +508,19 @@ int main(int argc, char* argv[])
 #endif
                                 PRINT("command:%s\n", *command);
                                 gst_pid = popen2(command, &gst_in_fp, &gst_out_fp);
+                            }
+                            if (gst_pid > 0) {
+                                fp = fopen(IP_FILE, "w");
+                                if (!fp) {
+                                    ERROR("Error when open file");
+                                } else {
+                                    fprintf(fp, "%s", inet_ntoa(peer_addr.sin_addr));
+                                    fflush(fp);
+                                    fclose(fp);
+                                }
+                                if (access(IP_FILE, F_OK) != 0) {
+                                    PRINT("create file failed!");
+                                }
                             }
                             PRINT("gst pid: %d\n", gst_pid);
                             PRINT("gst in fp: %d\n", gst_in_fp);
