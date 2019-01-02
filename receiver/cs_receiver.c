@@ -28,6 +28,7 @@
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <time.h>
+#include <pthread.h>
 
 #define USE_FIFO 0
 
@@ -48,6 +49,8 @@
 #define PRINT(fmt, ...) printf("%s   "fmt, get_cur_time(), ##__VA_ARGS__)
 #define ERROR(fmt, ...) printf("%s   "fmt" :%s\n", get_cur_time(), ##__VA_ARGS__, strerror(errno))
 
+pid_t gst_pid = -1;
+
 char *get_cur_time()
 {
     static char s[20];
@@ -63,7 +66,7 @@ char *get_cur_time()
     return s;
 }
 
-pid_t popen2(char * const *command, int *infp, int *outfp)
+pid_t popen2(char * const *command, char * const *envp, int *infp, int *outfp)
 {
     int p_stdin[2], p_stdout[2];
     pid_t pid;
@@ -82,7 +85,8 @@ pid_t popen2(char * const *command, int *infp, int *outfp)
         close(p_stdout[READ]);
         dup2(p_stdout[WRITE], WRITE);
 
-        execvp((const char *)*command, command);
+        //execvp((const char *)*command, command);
+        execve((const char *)*command, command, envp);
         ERROR("execvp");
         exit(1);
     }
@@ -100,7 +104,7 @@ pid_t popen2(char * const *command, int *infp, int *outfp)
     return pid;
 }
 
-pid_t exec(char * const *command)
+pid_t exec(char * const *command, char * const *envp)
 {
     pid_t pid;
 
@@ -110,7 +114,11 @@ pid_t exec(char * const *command)
         return pid;
     else if (pid == 0)
     {
-        execvp((const char *)*command, command);
+        if (envp == NULL) {
+            execvp((const char *)*command, command);
+        } else {
+            execve((const char *)*command, command, envp);
+        }
         ERROR("execvp");
         exit(1);
     }
@@ -151,6 +159,35 @@ int setup_udp_socket() {
     return udp_sock;
 }
 
+void *monitor_thread(void* ptr)
+{
+    pid_t w;
+    int status;
+    char *url;
+
+    url = (char *) ptr;
+    while (gst_pid > 0) {
+        w = waitpid(gst_pid, &status, WNOHANG);
+        if(w == gst_pid) {
+            PRINT("display process(%d) exited!\n", w);
+            if (WIFEXITED(status)) {
+                PRINT("exited, status=%d\n", WEXITSTATUS(status));
+            } else if (WIFSIGNALED(status)) {
+                PRINT("killed by signal %d\n", WTERMSIG(status));
+            } else if (WIFSTOPPED(status)) {
+                PRINT("stopped by signal %d\n", WSTOPSIG(status));
+            }
+            char * const command[] = {"ffvademo", url, NULL};
+            gst_pid = exec(command, NULL);
+            if (gst_pid > 0) {
+                PRINT("restart display process! process id:%d\n", gst_pid);
+            }
+        }
+        sleep(1);
+    }
+    PRINT("monitor thread exited!\n");
+}
+
 int main(int argc, char* argv[])
 {
     int fifo_fp = -1;
@@ -169,7 +206,6 @@ int main(int argc, char* argv[])
     fd_set fd_r;
     int gst_in_fp = -1;
     int gst_out_fp = -1;
-    pid_t gst_pid = -1;
     int just_connect = 0;
     char *gst_sink;
     int no_data_count = 0;
@@ -180,6 +216,7 @@ int main(int argc, char* argv[])
     FILE *fp;
     char *playUrl;
     int is_rtmp_mode = 0;
+    pthread_t pid;
 
     fflush(stdout);
     setvbuf(stdout, NULL, _IONBF, 0);
@@ -455,32 +492,37 @@ int main(int argc, char* argv[])
                             if (!strncmp(gst_sink, "ffplay", 6)) {
 #if USE_FIFO
                                 char * const command[] = {"ffplay", "-framerate", "50", "-infbuf", "-framedrop", "-analyzeduration", "1", FIFO_PATH, NULL};
-                                gst_pid = popen2(command, &gst_in_fp, &gst_out_fp);
+                                gst_pid = popen2(command, NULL, &gst_in_fp, &gst_out_fp);
 #else
                                 if (is_rtmp_mode) {
                                     if (playUrl != NULL) {
                                         char * const command[] = {"ffplay", "-fs", "-infbuf", "-framedrop", "-analyzeduration", "100000", "-i", playUrl, NULL};
-                                        gst_pid = exec(command);
+                                        gst_pid = exec(command, NULL);
                                     }
                                 } else {
                                     char * const command[] = {"ffplay", "-fs", "-infbuf", "-framedrop", "-analyzeduration", "100000", "-", NULL};
                                     //const char *command[] = {"ffplay", "-", NULL};
-                                    gst_pid = popen2(command, &gst_in_fp, &gst_out_fp);
+                                    gst_pid = popen2(command, NULL, &gst_in_fp, &gst_out_fp);
                                 }
 #endif
                             } else if (!strncmp(gst_sink, "ffvademo", 8)) {
                                 if (is_rtmp_mode) {
                                     if (playUrl != NULL) {
                                         char * const command[] = {"ffvademo", playUrl, NULL};
-                                        gst_pid = exec(command);
+                                        //char * envp[]={"TERM=xterm", NULL};
+                                        gst_pid = exec(command, NULL);
                                     }
                                 } else {
                                     char * const command[] = {"ffvademo", "/dev/stdin", NULL};
-                                    gst_pid = popen2(command, &gst_in_fp, &gst_out_fp);
+                                    char * envp[]={"TERM=xterm", NULL};
+                                    gst_pid = popen2(command, envp, &gst_in_fp, &gst_out_fp);
                                 }
+                                if (pthread_create(&pid, NULL, monitor_thread, playUrl) == 0) {
+                                    PRINT("create monitor thread!\n");
+                                };
                             } else if (!strncmp(gst_sink, "ffvadisplay", 11)) {
                                 char * const command[] = {"ffvadisplay", "-x", "1920", "-y", "1200", "/dev/stdin", NULL};
-                                gst_pid = popen2(command, &gst_in_fp, &gst_out_fp);
+                                gst_pid = popen2(command, NULL, &gst_in_fp, &gst_out_fp);
                             } else {
 #if USE_FIFO
                                 char location_buf[32] = {0};
@@ -507,7 +549,7 @@ int main(int argc, char* argv[])
 #endif
 #endif
                                 PRINT("command:%s\n", *command);
-                                gst_pid = popen2(command, &gst_in_fp, &gst_out_fp);
+                                gst_pid = popen2(command, NULL, &gst_in_fp, &gst_out_fp);
                             }
                             if (gst_pid > 0) {
                                 fp = fopen(IP_FILE, "w");
