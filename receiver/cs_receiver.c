@@ -41,10 +41,19 @@
 #define LOCAL_SERVER_PORT 53516
 #define DATA_BUF_SIZE 10240
 
-#define DISCOVER_MSG_TEMPLATE "{\"port\":%d,\"name\":\"okay\",\"ip\":\"%s\",\"width\":1280,\"height\":960,\"connect\":\"%d\"}"
+#define DISCOVER_MSG_TEMPLATE "{\"port\":%d,\"name\":\"okay\",\"ip\":\"%s\",\"width\":1280,\"height\":960,\"connect\":\"%d\",\"teacher_name\":\"%s\"}"
+#define JSON_FORMAT_STRING "{\"%s\":\"%s\"}"
 
 #define FIFO_PATH "/tmp/cast_fifo"
 #define IP_FILE "sender_ip"
+
+#define CMD_REQ "request"
+#define CMD_RES "response"
+#define MSG_CONNECT "connect"
+#define MSG_DISCONNECT "disconnect"
+#define MSG_ACCEPT "accept"
+#define MSG_REJECT "reject"
+#define MSG_CANCEL "cancel"
 
 #define PRINT(fmt, ...) printf("%s   "fmt, get_cur_time(), ##__VA_ARGS__)
 #define ERROR(fmt, ...) printf("%s   "fmt" :%s\n", get_cur_time(), ##__VA_ARGS__, strerror(errno))
@@ -64,6 +73,20 @@ char *get_cur_time()
     strftime(s, 20, "%Y-%m-%d %H:%M:%S", ltime);
 
     return s;
+}
+
+void *strrp(char *src, char *sub, char *rp, char *p)
+{
+    int sub_len=strlen(sub);
+    char *po=NULL,*q=src;
+
+    while((po=strstr(q,sub))!=NULL)
+    {
+        strncat(p,q,po-q);
+        strcat(p,rp);
+        q+=po-q+sub_len;
+    }
+    strcat(p,q);
 }
 
 pid_t popen2(char * const *command, char * const *envp, int *infp, int *outfp)
@@ -199,8 +222,10 @@ int main(int argc, char* argv[])
     int ret = -1;
     struct sockaddr_in my_addr;
     struct sockaddr_in peer_addr;
+    struct sockaddr_in discover_peer_addr;
+    struct sockaddr_in incoming_peer_addr;
     int addr_len;
-    char resp_msg_buf[128];
+    char resp_msg_buf[1024];
     char data_msg_buf[DATA_BUF_SIZE];
     int len;
     fd_set fd_r;
@@ -214,8 +239,9 @@ int main(int argc, char* argv[])
     struct timeval tv;
     int timeout = 0;
     FILE *fp;
-    char *playUrl;
+    char playUrl[128];
     int is_rtmp_mode = 0;
+    char teacher_name[128];
     pthread_t pid;
 
     fflush(stdout);
@@ -362,8 +388,8 @@ int main(int argc, char* argv[])
                     msg.msg_control = aux;
                     msg.msg_controllen = sizeof(aux);
                     msg.msg_flags = 0;
-                    msg.msg_name = &peer_addr;
-                    msg.msg_namelen = sizeof(peer_addr);
+                    msg.msg_name = &discover_peer_addr;
+                    msg.msg_namelen = sizeof(discover_peer_addr);
                     memset(broadcast_msg_buf, 0, sizeof(broadcast_msg_buf));
                     len = recvmsg(udp_sock, &msg, 0);
                     if (len < 0) {
@@ -372,23 +398,43 @@ int main(int argc, char* argv[])
                         udp_sock = setup_udp_socket();
                         break;
                     }
-                    //PRINT("Receive broadcast msg: %s from: %s:%d\n", broadcast_msg_buf, inet_ntoa(peer_addr.sin_addr), ntohs(peer_addr.sin_port));
+                    PRINT("Receive udp msg: %s len: %d from: %s:%d\n", broadcast_msg_buf, len,
+                            inet_ntoa(discover_peer_addr.sin_addr), ntohs(discover_peer_addr.sin_port));
                     if (!strncmp(broadcast_msg_buf, DISCOVER_MSG, 5)) {
                         no_data_count = 0;
-                        PRINT("Receive discover msg: %s, from: %s\n", broadcast_msg_buf, inet_ntoa(peer_addr.sin_addr));
+                        //PRINT("Receive discover msg: %s, from: %s\n", broadcast_msg_buf, inet_ntoa(discover_peer_addr.sin_addr));
                         for (cmsg = CMSG_FIRSTHDR(&msg); cmsg != NULL; cmsg = CMSG_NXTHDR(&msg, cmsg)) {
                             if (cmsg->cmsg_level == IPPROTO_IP) {
                                 struct in_pktinfo *i = (struct in_pktinfo*) CMSG_DATA(cmsg);
                                 //PRINT("Response discover msg with local ip: %s\n", inet_ntoa(i->ipi_spec_dst));
                                 memset(resp_msg_buf, 0, sizeof(resp_msg_buf));
-                                snprintf(resp_msg_buf, sizeof(resp_msg_buf), DISCOVER_MSG_TEMPLATE, DISCOVER_PORT, inet_ntoa(i->ipi_spec_dst), is_connected);
-                                //PRINT("is_connected=%d\n", is_connected);
-                                if (sendto(udp_sock, resp_msg_buf, strlen(resp_msg_buf), 0, (struct sockaddr *)&peer_addr, sizeof(peer_addr)) < 0) {
+                                snprintf(resp_msg_buf, sizeof(resp_msg_buf), \
+                                        DISCOVER_MSG_TEMPLATE, DISCOVER_PORT, inet_ntoa(i->ipi_spec_dst), is_connected, teacher_name);
+                                PRINT("send udp msg:%s to %s:%d\n", resp_msg_buf, inet_ntoa(discover_peer_addr.sin_addr), ntohs(discover_peer_addr.sin_port));
+                                if (sendto(udp_sock, resp_msg_buf, strlen(resp_msg_buf), 0,
+                                            (struct sockaddr *)&discover_peer_addr, sizeof(discover_peer_addr)) < 0) {
                                     PRINT("Error when send discover response to peer\n");
                                 }
                             }
                         }
-                    } else if (!strncmp(broadcast_msg_buf, "disconnect", 10)) {
+                    } else if (strstr(broadcast_msg_buf, CMD_REQ)) {
+                        PRINT("Receive request msg: %s, from: %s:%d\n", broadcast_msg_buf,
+                                inet_ntoa(discover_peer_addr.sin_addr), ntohs(discover_peer_addr.sin_port));
+                        incoming_peer_addr = discover_peer_addr;
+                        if (strstr(broadcast_msg_buf, MSG_CONNECT) && is_connected == 1) {
+                            is_connected = 2;
+                        } else if (strstr(broadcast_msg_buf, MSG_CANCEL) && is_connected == 2) {
+                            is_connected = 1;
+                        }
+                        memset(resp_msg_buf, 0, sizeof(resp_msg_buf));
+                        strrp(broadcast_msg_buf, CMD_REQ, CMD_RES, resp_msg_buf);
+                        if (tcp_client_sock > 0) {
+                            PRINT("send tcp msg:%s to %s:%d\n", resp_msg_buf, inet_ntoa(peer_addr.sin_addr), ntohs(peer_addr.sin_port));
+                            if (write(tcp_client_sock, resp_msg_buf, strlen(resp_msg_buf)) < 0) {
+                                PRINT("Error when send discover response to peer\n");
+                            }
+                        }
+                    } else if (!strncmp(broadcast_msg_buf, MSG_DISCONNECT, strlen(MSG_DISCONNECT))) {
                         if (tcp_client_sock > 0) {
                             close(tcp_client_sock);
                             tcp_client_sock = -1;
@@ -413,7 +459,7 @@ int main(int argc, char* argv[])
                         } else {
                             just_connect = 1;
                             is_connected = 1;
-                            last_read_time = now_time;
+                            //last_read_time = now_time;
                             PRINT("Accept peer addr: %s:%d\n", inet_ntoa(peer_addr.sin_addr), ntohs(peer_addr.sin_port));
                         }
                     } else {
@@ -426,15 +472,17 @@ int main(int argc, char* argv[])
                     //PRINT("Receive data len: %d\n", len);
                     if (len > 0) {
                         no_data_count = 0;
-                        time(&last_read_time);
+                        //time(&last_read_time);
                     } else {
                         no_data_count++;
                     }
                     //PRINT("len=%d, no_data_count=%d\n", len, no_data_count);
                     if (len < 0 || no_data_count > 2) {
                         PRINT("Failed to receive from tcp client socket, close the socket\n");
-                        close(tcp_client_sock);
-                        tcp_client_sock = -1;
+                        if (tcp_client_sock > 0) {
+                            close(tcp_client_sock);
+                            tcp_client_sock = -1;
+                        }
                         if (gst_pid > 0) {
                             kill(gst_pid, SIGKILL);
                             waitpid(gst_pid, NULL, 0);
@@ -483,8 +531,14 @@ int main(int argc, char* argv[])
                                     PRINT("is_rtmp_mode: %d\n", is_rtmp_mode);
                                 }
                                 if (strstr(info, "URL:")) {
-                                    playUrl = strstr(info, " ") + 1;
+                                    memset(playUrl, 0, sizeof(playUrl));
+                                    strcpy(playUrl, strstr(info, " ") + 1);
                                     PRINT("play url:%s\n", playUrl);
+                                }
+                                if (strstr(info, "TC_NAME:")) {
+                                    memset(teacher_name, 0, sizeof(teacher_name));
+                                    strcpy(teacher_name, strstr(info, " ") + 1);
+                                    PRINT("teacher name:%s\n", teacher_name);
                                 }
                                 info = strtok(NULL, "\r\n");
                             }
@@ -585,7 +639,7 @@ int main(int argc, char* argv[])
                                 }
 #endif
                             }
-                        } else if (strstr(data_msg_buf, "disconnect")) {
+                        } else if (strstr(data_msg_buf, MSG_DISCONNECT)) {
                                 if (tcp_client_sock > 0) {
                                     close(tcp_client_sock);
                                     tcp_client_sock = -1;
@@ -601,7 +655,23 @@ int main(int argc, char* argv[])
                                 }
                                 PRINT("disconnect by user!\n");
                         } else {
-                            //PRINT("Receive data:%s len:%d\n", data_msg_buf, len);
+                            PRINT("Receive tcp msg: %s len:%d\n", data_msg_buf, len);
+                            if (strstr(data_msg_buf, CMD_REQ)) {
+                                if ((strstr(data_msg_buf, MSG_ACCEPT) || strstr(data_msg_buf, MSG_REJECT)) && (is_connected) == 2) {
+                                    is_connected = 1;
+                                }
+                                PRINT("Receive request msg: %s, from: %s:%d\n", data_msg_buf,
+                                        inet_ntoa(peer_addr.sin_addr), ntohs(peer_addr.sin_port));
+                                memset(resp_msg_buf, 0, sizeof(resp_msg_buf));
+                                strrp(data_msg_buf, CMD_REQ, CMD_RES, resp_msg_buf);
+                                PRINT("send udp msg:%s to %s:%d\n", resp_msg_buf, inet_ntoa(incoming_peer_addr.sin_addr), ntohs(incoming_peer_addr.sin_port));
+                                if (udp_sock > 0) {
+                                    if (sendto(udp_sock, resp_msg_buf, strlen(resp_msg_buf), 0,
+                                                (struct sockaddr *)&incoming_peer_addr, sizeof(incoming_peer_addr)) < 0) {
+                                        PRINT("Error when send response to discover peer\n");
+                                    }
+                                }
+                            }
 #if USE_FIFO
                             if (fifo_fp > 0) {
                                 len = write(fifo_fp, data_msg_buf, len);
@@ -643,7 +713,19 @@ int main(int argc, char* argv[])
                                     close(fifo_fp);
                                     fifo_fp = -1;
                                 }
+
+                                if (udp_sock > 0 && is_connected == 2) {
+                                    memset(resp_msg_buf, 0, sizeof(resp_msg_buf));
+                                    snprintf(resp_msg_buf, sizeof(resp_msg_buf), JSON_FORMAT_STRING, CMD_RES, MSG_ACCEPT);
+                                    PRINT("send udp msg:%s to %s:%d\n", resp_msg_buf, inet_ntoa(discover_peer_addr.sin_addr), ntohs(discover_peer_addr.sin_port));
+                                    if (sendto(udp_sock, resp_msg_buf, strlen(resp_msg_buf), 0,
+                                                (struct sockaddr *)&discover_peer_addr, sizeof(discover_peer_addr)) < 0) {
+                                        PRINT("Error when send discover response to peer\n");
+                                    }
+                                }
+
                                 is_connected = 0;
+
                                 if (access(IP_FILE, F_OK) == 0) {
                                     if (remove(IP_FILE) == -1) {
                                         ERROR("Error when remove file");
