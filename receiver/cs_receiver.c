@@ -27,6 +27,7 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <fcntl.h>
+#include <sys/time.h>
 #include <time.h>
 #include <pthread.h>
 
@@ -62,15 +63,18 @@ pid_t gst_pid = -1;
 
 char *get_cur_time()
 {
-    static char s[20];
+    static char s[28];
     time_t t;
     struct tm* ltime;
+    struct timeval tv;
 
-    time(&t);
-
-    ltime = localtime(&t);
-
-    strftime(s, 20, "%Y-%m-%d %H:%M:%S", ltime);
+    //time(&t);
+    //ltime = localtime(&t);
+    gettimeofday(&tv, NULL);
+    //ltime = localtime(&tv->tv_sec);
+    ltime = localtime(&tv.tv_sec);
+    strftime(s, 28, "%Y-%m-%d %H:%M:%S", ltime);
+    sprintf(s + strlen(s), ".%03d", (int) (tv.tv_usec / 1000));
 
     return s;
 }
@@ -224,6 +228,7 @@ int main(int argc, char* argv[])
     struct sockaddr_in peer_addr;
     struct sockaddr_in discover_peer_addr;
     struct sockaddr_in incoming_peer_addr;
+    struct sockaddr_in request_connect_peer_addr;
     int addr_len;
     char resp_msg_buf[1024];
     char data_msg_buf[DATA_BUF_SIZE];
@@ -398,8 +403,8 @@ int main(int argc, char* argv[])
                         udp_sock = setup_udp_socket();
                         break;
                     }
-                    PRINT("Receive udp msg: %s len: %d from: %s:%d\n", broadcast_msg_buf, len,
-                            inet_ntoa(discover_peer_addr.sin_addr), ntohs(discover_peer_addr.sin_port));
+                    //PRINT("Receive udp msg: %s len: %d from: %s:%d\n", broadcast_msg_buf, len,
+                    //        inet_ntoa(discover_peer_addr.sin_addr), ntohs(discover_peer_addr.sin_port));
                     if (!strncmp(broadcast_msg_buf, DISCOVER_MSG, 5)) {
                         no_data_count = 0;
                         //PRINT("Receive discover msg: %s, from: %s\n", broadcast_msg_buf, inet_ntoa(discover_peer_addr.sin_addr));
@@ -418,13 +423,24 @@ int main(int argc, char* argv[])
                             }
                         }
                     } else if (strstr(broadcast_msg_buf, CMD_REQ)) {
-                        PRINT("Receive request msg: %s, from: %s:%d\n", broadcast_msg_buf,
+                        PRINT("Receive udp request msg: %s, from: %s:%d\n", broadcast_msg_buf,
                                 inet_ntoa(discover_peer_addr.sin_addr), ntohs(discover_peer_addr.sin_port));
                         incoming_peer_addr = discover_peer_addr;
                         if (strstr(broadcast_msg_buf, MSG_CONNECT) && is_connected == 1) {
+                            request_connect_peer_addr = discover_peer_addr;
                             is_connected = 2;
                         } else if (strstr(broadcast_msg_buf, MSG_CANCEL) && is_connected == 2) {
                             is_connected = 1;
+                        } else if (strstr(broadcast_msg_buf, MSG_ACCEPT) || strstr(broadcast_msg_buf, MSG_REJECT)) {
+                            memset(resp_msg_buf, 0, sizeof(resp_msg_buf));
+                            strrp(broadcast_msg_buf, CMD_REQ, CMD_RES, resp_msg_buf);
+                            if (sendto(udp_sock, resp_msg_buf, strlen(resp_msg_buf), 0,
+                                        (struct sockaddr *)&request_connect_peer_addr, sizeof(request_connect_peer_addr)) < 0) {
+                                PRINT("Error when send response to discover peer\n");
+                            }
+                        } else {
+                            PRINT("is_connected=%d\n", is_connected);
+                            break;
                         }
                         memset(resp_msg_buf, 0, sizeof(resp_msg_buf));
                         strrp(broadcast_msg_buf, CMD_REQ, CMD_RES, resp_msg_buf);
@@ -455,7 +471,7 @@ int main(int argc, char* argv[])
                         addr_len = sizeof(peer_addr);
                         tcp_client_sock = accept(tcp_sock, (struct sockaddr *)&peer_addr, &addr_len);
                         if (tcp_client_sock < 0) {
-                            PRINT("Error when accepting client\n");
+                            ERROR("Error when accepting client\n");
                         } else {
                             just_connect = 1;
                             is_connected = 1;
@@ -655,12 +671,12 @@ int main(int argc, char* argv[])
                                 }
                                 PRINT("disconnect by user!\n");
                         } else {
-                            PRINT("Receive tcp msg: %s len:%d\n", data_msg_buf, len);
+                            //PRINT("Receive tcp msg: %s len:%d\n", data_msg_buf, len);
                             if (strstr(data_msg_buf, CMD_REQ)) {
                                 if ((strstr(data_msg_buf, MSG_ACCEPT) || strstr(data_msg_buf, MSG_REJECT)) && (is_connected) == 2) {
                                     is_connected = 1;
                                 }
-                                PRINT("Receive request msg: %s, from: %s:%d\n", data_msg_buf,
+                                PRINT("Receive tcp request msg: %s, from: %s:%d\n", data_msg_buf,
                                         inet_ntoa(peer_addr.sin_addr), ntohs(peer_addr.sin_port));
                                 memset(resp_msg_buf, 0, sizeof(resp_msg_buf));
                                 strrp(data_msg_buf, CMD_REQ, CMD_RES, resp_msg_buf);
