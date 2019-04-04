@@ -48,6 +48,8 @@
 #define FIFO_PATH "/tmp/cast_fifo"
 #define IP_FILE "sender_ip"
 
+#define MSG_HEARTBEAT "hello"
+#define MSG_ACK "ok"
 #define CMD_REQ "request"
 #define CMD_RES "response"
 #define MSG_CONNECT "connect"
@@ -686,6 +688,13 @@ int main(int argc, char* argv[])
                                                 (struct sockaddr *)&incoming_peer_addr, sizeof(incoming_peer_addr)) < 0) {
                                         PRINT("Error when send response to discover peer\n");
                                     }
+                                }
+                            }
+
+                            if (strstr(data_msg_buf, MSG_HEARTBEAT)) {
+                                memset(resp_msg_buf, 0, sizeof(resp_msg_buf));
+                                if (write(tcp_client_sock, MSG_ACK, strlen(MSG_ACK)) < 0) {
+                                    PRINT("Error when send heartbeat response to peer\n");
                                 }
                             }
 #if USE_FIFO
